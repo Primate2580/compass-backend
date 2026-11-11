@@ -37,6 +37,7 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE users (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email       text UNIQUE NOT NULL,
+  password_hash text,                           -- bcrypt hash; the real password is never stored
   full_name   text,
   timezone    text NOT NULL DEFAULT 'Africa/Lagos',
   currency    char(3) NOT NULL DEFAULT 'NGN',

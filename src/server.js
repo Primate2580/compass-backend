@@ -4,13 +4,32 @@ import cors from "cors";
 import { query } from "./db.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { handleChat } from "./chat.js";
+import { requireAuth, requireSelf, register, login, me, authLimiter, chatLimiter } from "./auth.js";
 
 const app = express();
-app.use(cors());
+// Which websites may call this API from a browser. Set FRONTEND_URL in .env (or on Render) to your
+// Vercel address, e.g. https://compass-xyz.vercel.app (several allowed, separated by commas).
+// If it isn't set (local development), any origin is allowed.
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((o) => o.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
+app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
 app.use(express.json());
 
 // Express 4 doesn't catch errors from async routes by itself, so we wrap each one.
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+// Render (and most hosts) sit behind a proxy; this lets rate limits see each visitor's real address.
+app.set("trust proxy", 1);
+
+// --- Login -----------------------------------------------------------------
+app.post("/auth/register", authLimiter, wrap(register));
+app.post("/auth/login", authLimiter, wrap(login));
+app.get("/auth/me", requireAuth, wrap(me));
+
+// Everything under /users/:id/... now needs a valid token AND must be the owner's own id.
+app.use("/users/:id", requireAuth, requireSelf);
 
 // Only these columns can be written to the profiles table through the API.
 const PROFILE_FIELDS = [
@@ -31,24 +50,6 @@ const PROFILE_FIELDS = [
 
 // --- Health check ---------------------------------------------------------
 app.get("/health", (req, res) => res.json({ ok: true }));
-
-// --- 1. Create a user -----------------------------------------------------
-// Body: { "email": "a@b.com", "full_name": "Ada", "timezone": "Africa/Lagos" }
-app.post(
-  "/users",
-  wrap(async (req, res) => {
-    const { email, full_name, timezone } = req.body;
-    if (!email) return res.status(400).json({ error: "email is required" });
-
-    const { rows } = await query(
-      `insert into users (email, full_name, timezone)
-       values ($1, $2, coalesce($3, 'Africa/Lagos'))
-       returning id, email, full_name, timezone`,
-      [email, full_name ?? null, timezone ?? null]
-    );
-    res.status(201).json(rows[0]);
-  })
-);
 
 // --- 2. Save or update the onboarding profile -----------------------------
 // Body: any of the PROFILE_FIELDS, e.g. { "role_type": "freelancer", "industry": "design" }
@@ -127,17 +128,6 @@ app.get(
 
 // --- 5b. Routes used by the React frontend --------------------------------
 
-// Who is this user, and have they finished onboarding?
-app.get(
-  "/users/:id",
-  wrap(async (req, res) => {
-    const u = await query("select id, email, full_name, timezone from users where id = $1", [req.params.id]);
-    if (!u.rows.length) return res.status(404).json({ error: "User not found" });
-    const p = await query("select onboarding_done_at from profiles where user_id = $1", [req.params.id]);
-    res.json({ user: u.rows[0], profile: p.rows[0] || null });
-  })
-);
-
 // Body: { "title": "Land 3 new clients", "horizon": "3_month" }  (horizon: 3_month | 12_month | other)
 app.post(
   "/users/:id/goals",
@@ -207,6 +197,7 @@ app.patch(
 // Leave conversation_id out to start a new conversation; send it back to continue one.
 app.post(
   "/users/:id/chat",
+  chatLimiter,
   wrap(async (req, res) => {
     const result = await handleChat(req.params.id, req.body.conversation_id, req.body.message);
     res.json(result);
